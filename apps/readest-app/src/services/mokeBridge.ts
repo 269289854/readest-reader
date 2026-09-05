@@ -338,11 +338,7 @@ async function validateProgressResponse(response: Response): Promise<void> {
   } catch {
     throw new MokeProgressSaveError('progress.invalid_response', response.status);
   }
-  if (
-    typeof envelope.err === 'string' &&
-    envelope.err !== '' &&
-    envelope.err !== 'ok'
-  ) {
+  if (typeof envelope.err === 'string' && envelope.err !== '' && envelope.err !== 'ok') {
     const serverCode = SAFE_ERROR_CODE.test(envelope.err) ? envelope.err : 'invalid';
     throw new MokeProgressSaveError(`progress.api.${serverCode}`, response.status);
   }
@@ -401,6 +397,35 @@ async function saveProgressToMokeServer(data: Record<string, unknown>): Promise<
   } catch (error) {
     // Best effort: rendering continues, while both Moke IPC and the browser
     // error event expose a stable, non-secret failure for diagnostics/E2E.
+    reportMokeReaderError(error);
+  }
+}
+
+let onlineReadMarked = false;
+
+export async function markMokeOnlineRead(): Promise<void> {
+  if (onlineReadMarked || typeof window === 'undefined') return;
+  const source = window.__MOKE_BOOK_SOURCE;
+  const serverUrl = window.__MOKE_SERVER_URL;
+  const mokeBookId = window.__MOKE_BOOK_ID;
+  if (source?.kind !== 'remote' || !serverUrl || !mokeBookId) return;
+  onlineReadMarked = true;
+  try {
+    const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
+    const response = await tauriFetch(
+      `${serverUrl}/api/book/${encodeURIComponent(String(mokeBookId))}/readstate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ read_state: 1, online_read: 1 }),
+        credentials: 'include',
+        maxRedirections: 5,
+        danger: { acceptInvalidCerts: true, acceptInvalidHostnames: true },
+      } as unknown as RequestInit,
+    );
+    if (!response.ok) throw new Error(`moke.online_read.http.${response.status}`);
+  } catch (error) {
+    onlineReadMarked = false;
     reportMokeReaderError(error);
   }
 }

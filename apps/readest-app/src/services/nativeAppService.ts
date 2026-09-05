@@ -40,7 +40,6 @@ import type { Book } from '@/types/book';
 import { getOSPlatform, isContentURI, isFileURI, isValidURL } from '@/utils/misc';
 import { getDirPath, getFilename } from '@/utils/path';
 import { NativeFile, RemoteFile } from '@/utils/file';
-import { createMokeRemoteSourceTransport } from '@/services/mokeRemoteSource';
 import {
   copyURIToPath,
   getStorefrontRegionCode,
@@ -310,8 +309,7 @@ export const nativeFileSystem: FileSystem = {
     const { fp, baseDir } = this.resolvePath(normalizedPath, base);
     let fname = safeDecodePath(name || getFilename(fp));
     if (isValidURL(path)) {
-      const transport = createMokeRemoteSourceTransport(path);
-      return await new RemoteFile(path, fname, '', Date.now(), transport ?? undefined).open();
+      return await new RemoteFile(path, fname).open();
     } else if (isContentURI(path) || (isFileURI(path) && OS_TYPE === 'ios')) {
       fname = safeDecodePath(await basename(path));
       if (path.includes('com.android.externalstorage')) {

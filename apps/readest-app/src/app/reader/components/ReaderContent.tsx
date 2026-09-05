@@ -33,10 +33,6 @@ import {
 import { clearDiscordPresence } from '@/utils/discord';
 import { BOOK_IDS_SEPARATOR } from '@/services/constants';
 import { emitReaderEvent } from '@/services/mokeBridge';
-import {
-  mokeRemoteSourceErrorDetail,
-  type MokeRemoteSourceErrorDetail,
-} from '@/services/mokeRemoteSource';
 import { useAuth } from '@/context/AuthContext';
 import { resolveReaderReturnTarget } from '@/utils/readerBack';
 
@@ -49,6 +45,7 @@ import LazyNotebook from './notebook/LazyNotebook';
 import LocalSendManager from '@/components/localsend/LocalSendManager';
 import BooksGrid from './BooksGrid';
 import { runTransientReaderBootstrap } from '../utils/transientReader';
+import { makeMokeSourceBook } from '@/helpers/mokeBookSource';
 
 // These dialogs pull in metadata, sync-provider, and AI integrations that are
 // not needed to paint or open a book. Keep them out of the cold-start path and
@@ -68,6 +65,11 @@ const getMokeEmbeddedFiles = () => {
   if (typeof window === 'undefined' || !window.__MOKE_EMBEDDED) return [];
   return new URLSearchParams(window.location.search).getAll('file').filter(Boolean);
 };
+
+const getMokeBookSource = () =>
+  typeof window !== 'undefined' && window.__MOKE_EMBEDDED
+    ? (window.__MOKE_BOOK_SOURCE ?? null)
+    : null;
 
 const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ ids, settings }) => {
   const _ = useTranslation();
@@ -94,7 +96,6 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
   const closingBooksRef = useRef<{ bookKeys: string; promise: Promise<void> } | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorLoading, setErrorLoading] = useState(false);
-  const [remoteSourceError, setRemoteSourceError] = useState<MokeRemoteSourceErrorDetail | null>(null);
 
   useBookShortcuts({ sideBarBookKey, bookKeys });
   useMokeCommandListener(bookKeys);
@@ -118,7 +119,10 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
     // No ids provided — check if the window was opened with a file path,
     // either from the desktop window bootstrap or Moke mobile's URL.
     // Dispatching is deferred to a separate effect that waits for appService.
-    if (requestedIds.length === 0 && (window.OPEN_WITH_FILES?.length || mokeFiles.length)) {
+    if (
+      requestedIds.length === 0 &&
+      (getMokeBookSource() || window.OPEN_WITH_FILES?.length || mokeFiles.length)
+    ) {
       return;
     }
 
@@ -182,21 +186,16 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
     if (!appService) return;
     if (hasHandledOpenFiles.current) return;
 
+    const mokeSource = getMokeBookSource();
     const mokeFiles = getMokeEmbeddedFiles();
     const files = window.OPEN_WITH_FILES?.length ? window.OPEN_WITH_FILES : mokeFiles;
-    if (!files?.length) return;
+    if (!mokeSource && !files?.length) return;
 
     hasHandledOpenFiles.current = true;
     window.OPEN_WITH_FILES = null;
 
-    const failToOpen = (error?: unknown) => {
+    const failToOpen = () => {
       setErrorLoading(true);
-      const detail = mokeRemoteSourceErrorDetail(error);
-      if (detail) {
-        setRemoteSourceError(detail);
-        void emitReaderEvent('reader:error', detail as unknown as Record<string, unknown>);
-        return;
-      }
       eventDispatcher.dispatch('toast', {
         message: _('Unable to open book'),
         callback: async () => {
@@ -215,7 +214,11 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
       // before the first NativeFile.open(). Explicitly grant that exact file
       // before importing it; this is a no-op on Android and harmless on
       // desktop, where the static AppData scope already covers the file.
-      await appService.allowPathsInScopes?.(files, false);
+      if (mokeSource?.kind === 'local') {
+        await appService.allowPathsInScopes?.([mokeSource.filePath], false);
+      } else if (!mokeSource) {
+        await appService.allowPathsInScopes?.(files, false);
+      }
 
       // Load the real library from disk before building any transient entry, so
       // initViewState's getBookByHash can resolve the book and an empty-store
@@ -229,46 +232,58 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
 
       const bookIds: string[] = [];
       let libraryMutated = false;
-      let firstOpenError: unknown;
-      for (const file of files) {
-        try {
-          // Hash-precheck: if the file is already a managed (non-deleted)
-          // library book, route to it without importBook — transient import
-          // would otherwise rewrite that entry's filePath/createdAt.
-          let existingHash: string | undefined;
+      if (mokeSource) {
+        const directBook = makeMokeSourceBook(mokeSource);
+        const existing = getBookByHash(directBook.hash);
+        if (existing) {
+          Object.assign(existing, directBook);
+        } else {
+          library.push(directBook);
+        }
+        bookIds.push(directBook.hash);
+        libraryMutated = true;
+      }
+
+      if (!mokeSource) {
+        for (const file of files) {
           try {
-            const fileobj = await appService.openFile(file, 'None');
+            // Hash-precheck: if the file is already a managed (non-deleted)
+            // library book, route to it without importBook — transient import
+            // would otherwise rewrite that entry's filePath/createdAt.
+            let existingHash: string | undefined;
             try {
-              existingHash = await partialMD5(fileobj);
-            } finally {
-              const closable = fileobj as File & { close?: () => Promise<void> };
-              if (closable.close) await closable.close();
+              const fileobj = await appService.openFile(file, 'None');
+              try {
+                existingHash = await partialMD5(fileobj);
+              } finally {
+                const closable = fileobj as File & { close?: () => Promise<void> };
+                if (closable.close) await closable.close();
+              }
+            } catch (e) {
+              console.warn('Pre-hash failed, falling back to transient import:', file, e);
+            }
+
+            if (existingHash) {
+              const existing = getBookByHash(existingHash);
+              if (existing && !existing.deletedAt) {
+                bookIds.push(existing.hash);
+                continue;
+              }
+            }
+
+            const book = await appService.importBook(file, library, { transient: true });
+            if (book) {
+              bookIds.push(book.hash);
+              libraryMutated = true;
             }
           } catch (e) {
-            console.warn('Pre-hash failed, falling back to transient import:', file, e);
+            console.warn('Failed to open file in reader window:', file, e);
           }
-
-          if (existingHash) {
-            const existing = getBookByHash(existingHash);
-            if (existing && !existing.deletedAt) {
-              bookIds.push(existing.hash);
-              continue;
-            }
-          }
-
-          const book = await appService.importBook(file, library, { transient: true });
-          if (book) {
-            bookIds.push(book.hash);
-            libraryMutated = true;
-          }
-        } catch (e) {
-          firstOpenError ??= e;
-          console.warn('Failed to open file in reader window:', file, e);
         }
       }
 
       if (bookIds.length === 0) {
-        failToOpen(firstOpenError);
+        failToOpen();
         return;
       }
       if (libraryMutated) setLibrary(library);
@@ -289,7 +304,7 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
         if (!getViewState(key)) {
           initViewState(envConfig, id, key, isPrimary).catch((error) => {
             console.log('Error initializing book', key, error);
-            failToOpen(error);
+            failToOpen();
           });
           if (index === 0) setSideBarBookKey(key);
         }
@@ -521,31 +536,6 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
       saveSettingsAndGoToLibrary();
     }
   };
-
-  if (remoteSourceError) {
-    return (
-      <div className='hero hero-content full-height px-6 text-center'>
-        <div className='max-w-md'>
-          <h1 className='text-xl font-semibold'>{_('Unable to open book')}</h1>
-          <p className='mt-3 opacity-70'>{_('Network error')}</p>
-          <div className='mt-6 flex flex-wrap justify-center gap-3'>
-            <button className='btn btn-primary' onClick={() => window.location.reload()}>
-              {_('Retry')}
-            </button>
-            <button
-              className='btn btn-outline'
-              onClick={async () => {
-                const service = await envConfig.getAppService();
-                await closeReaderWindowOrGoToLibrary(service, router);
-              }}
-            >
-              {_('Go Back')} · {_('Download')}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   if (!bookKeys || bookKeys.length === 0) {
     return (

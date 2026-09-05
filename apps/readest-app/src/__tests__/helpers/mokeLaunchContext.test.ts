@@ -44,25 +44,48 @@ describe('bootstrapMokeLaunchContext', () => {
     expect(window.__MOKE_RESTORE_PROGRESS).toMatchObject({ location: 'epubcfi(/6/8)' });
   });
 
-  it('keeps the online source origin separate from progress persistence', () => {
-    window.history.replaceState(
-      {},
-      '',
-      '/reader?moke=1&mokeBookId=42&mokeSourceServerUrl=https%3A%2F%2Fbooks.example',
-    );
-
-    bootstrapMokeLaunchContext();
-
-    expect(window.__MOKE_SOURCE_SERVER_URL).toBe('https://books.example');
-    expect(window.__MOKE_SERVER_URL).toBeNull();
-  });
-
   it('forwards the Moke debug panel launch flag', () => {
     window.history.replaceState({}, '', '/reader?moke=1&mokeDebug=1&mokeBookId=42');
 
     bootstrapMokeLaunchContext();
 
     expect(window.__MOKE_DEBUG_PANEL).toBe(true);
+  });
+
+  it('parses a direct Moke source without exposing it outside the bootstrap global', () => {
+    const source = {
+      kind: 'remote',
+      identity: 'mokedeadbeefdeadbeef',
+      cacheScope: '0123456789abcdef',
+      cacheLimitBytes: 384 * 1024 * 1024,
+      bookId: '42',
+      format: 'epub',
+      title: 'Sample',
+      author: 'Author',
+      serverUrl: 'https://books.test',
+      url: 'https://books.test/api/book/42.epub?mode=read',
+    };
+    window.history.replaceState(
+      {},
+      '',
+      `/reader?moke=1&mokeSource=${encodeURIComponent(JSON.stringify(source))}`,
+    );
+
+    bootstrapMokeLaunchContext();
+
+    expect(window.__MOKE_BOOK_SOURCE).toEqual(source);
+  });
+
+  it('rejects malformed direct source payloads', () => {
+    window.history.replaceState(
+      {},
+      '',
+      `/reader?moke=1&mokeSource=${encodeURIComponent(JSON.stringify({ kind: 'remote' }))}`,
+    );
+
+    bootstrapMokeLaunchContext();
+
+    expect(window.__MOKE_BOOK_SOURCE).toBeNull();
   });
 
   it('keeps the debug panel enabled when native navigation carries a stale zero flag', () => {

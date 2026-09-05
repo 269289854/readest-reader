@@ -1,3 +1,5 @@
+import { parseMokeBookSource } from '@/helpers/mokeBookSource';
+
 const MOKE_PROGRESS_STORAGE_PREFIX = 'moke:reading-progress:';
 const MOKE_DEVELOPER_STORAGE_KEY = 'moke-developer-storage';
 
@@ -70,7 +72,6 @@ export function bootstrapMokeLaunchContext(): void {
   }
 
   const serverUrl = params.get('mokeServerUrl') || '';
-  const sourceServerUrl = params.get('mokeSourceServerUrl') || '';
   const mokeBookId = params.get('mokeBookId') || '';
   window.__MOKE_EMBEDDED = true;
   window.__MOKE_EINK = params.get('mokeEink') === '1';
@@ -96,7 +97,15 @@ export function bootstrapMokeLaunchContext(): void {
   window.__MOKE_DEBUG_PANEL = params.get('mokeDebug') === '1' || persistedDebugPanel;
   window.__MOKE_BOOK_ID = mokeBookId || null;
   window.__MOKE_SERVER_URL = serverUrl || null;
-  window.__MOKE_SOURCE_SERVER_URL = sourceServerUrl || null;
+  window.__MOKE_BOOK_SOURCE = null;
+  const source = params.get('mokeSource');
+  if (source) {
+    try {
+      window.__MOKE_BOOK_SOURCE = parseMokeBookSource(JSON.parse(source));
+    } catch {
+      window.__MOKE_BOOK_SOURCE = null;
+    }
+  }
   let remoteProgress: Record<string, unknown> | null = null;
   const progress = params.get('mokeRestoreProgress');
   if (progress) {

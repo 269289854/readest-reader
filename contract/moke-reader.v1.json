@@ -5,11 +5,11 @@
   "readerRoute": "/readest/reader",
   "progressSchema": "moke.readest.progress.v1",
   "launchParameters": {
-    "file": { "required": true, "repeatable": true, "description": "Host-authorized local book path" },
+    "file": { "required": false, "repeatable": true, "description": "Legacy host-authorized local book path" },
+    "mokeSource": { "required": false, "encoding": "JSON", "description": "Moke local or authenticated remote source; remote URLs must match serverUrl /api/book/{id}.{epub|pdf}?mode=read" },
     "moke": { "required": true, "constant": "1" },
     "mokeBookId": { "required": false },
     "mokeServerUrl": { "required": false, "protocols": ["http", "https"] },
-    "mokeSourceServerUrl": { "required": false, "protocols": ["http", "https"], "description": "Current Moke server origin used only to authorize an online source" },
     "mokeRestoreProgress": { "required": false, "encoding": "JSON" },
     "mokeReturnTo": { "required": false, "allowed": ["/library"] },
     "mokeEink": { "required": false, "allowed": ["0", "1"] },
@@ -19,6 +19,9 @@
     "ext_reader_event",
     "moke_navigate",
     "moke_runtime_platform"
+    ,"moke_get_reader_cache_stats"
+    ,"moke_trim_reader_cache"
+    ,"moke_clear_reader_cache"
   ],
   "readerEvents": [
     "book:opened",
@@ -27,14 +30,6 @@
     "reader:error",
     "annotation-locate:finished"
   ],
-  "onlineSource": {
-    "formats": ["epub"],
-    "pathTemplate": "/read/resource/{mokeBookId}.epub?revision={revision}",
-    "mime": "application/epub+zip",
-    "rangeRequired": true,
-    "redirects": 0,
-    "transport": "@tauri-apps/plugin-http"
-  },
   "progressApi": {
     "method": "POST",
     "pathTemplate": "/api/book/{mokeBookId}/progress",

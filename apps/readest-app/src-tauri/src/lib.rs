@@ -464,7 +464,7 @@ fn open_reader_window_with_debug(
     debug_panel: bool,
     moke_book_id: Option<String>,
     restore_progress: Option<serde_json::Value>,
-    moke_source_server_url: Option<String>,
+    moke_source: Option<serde_json::Value>,
 ) -> Result<(), String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static READER_SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -506,8 +506,7 @@ fn open_reader_window_with_debug(
     let moke_book_id_js = serde_json::to_string(&moke_book_id).map_err(|e| e.to_string())?;
     let restore_progress_js =
         serde_json::to_string(&restore_progress).map_err(|e| e.to_string())?;
-    let source_server_url_js =
-        serde_json::to_string(&moke_source_server_url).map_err(|e| e.to_string())?;
+    let moke_source_js = serde_json::to_string(&moke_source).map_err(|e| e.to_string())?;
 
     let init_script = format!(
         r#"
@@ -516,8 +515,8 @@ fn open_reader_window_with_debug(
             window.__MOKE_EINK = {eink_js};
             window.__MOKE_DEBUG_PANEL = {debug_panel_js};
             window.__MOKE_BOOK_ID = {moke_book_id_js};
-            window.__MOKE_SOURCE_SERVER_URL = {source_server_url_js};
             window.__MOKE_RESTORE_PROGRESS = {restore_progress_js};
+            window.__MOKE_BOOK_SOURCE = {moke_source_js};
             window.addEventListener('DOMContentLoaded', function() {{
                 document.documentElement.classList.add('edge-to-edge');
             }});
@@ -548,17 +547,179 @@ fn open_reader_window_with_debug(
         let reader_url = WebviewUrl::App("readest/reader.html".into());
 
         let result = WebviewWindowBuilder::new(&app_main, label, reader_url)
-        .title("Readest")
-        .inner_size(1280.0, 800.0)
-        .min_inner_size(800.0, 600.0)
-        .resizable(true)
-        .initialization_script(&init_script)
-        .build();
+            .title("Readest")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(800.0, 600.0)
+            .resizable(true)
+            .initialization_script(&init_script)
+            .build();
         if let Err(e) = result {
             log::error!("failed to open reader window: {e}");
         }
     })
     .map_err(|e| e.to_string())
+}
+
+#[cfg(desktop)]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MokeReaderSourceValidation {
+    kind: String,
+    identity: String,
+    cache_scope: String,
+    cache_limit_bytes: u64,
+    book_id: String,
+    format: String,
+    title: String,
+    author: String,
+    file_path: Option<String>,
+    server_url: Option<String>,
+    url: Option<String>,
+}
+
+#[cfg(desktop)]
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(desktop)]
+fn validate_moke_reader_source(
+    value: &serde_json::Value,
+    command_file_path: Option<&str>,
+) -> Result<(), String> {
+    let source: MokeReaderSourceValidation =
+        serde_json::from_value(value.clone()).map_err(|_| "invalid Moke source".to_string())?;
+    if !source.identity.starts_with("moke")
+        || !is_lower_hex(&source.identity[4..], 16)
+        || !is_lower_hex(&source.cache_scope, 16)
+        || source.book_id.is_empty()
+        || !source.book_id.bytes().all(|byte| byte.is_ascii_digit())
+        || source.format.is_empty()
+        || source.format.len() > 16
+        || !source
+            .format
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+        || source.title.len() > 16 * 1024
+        || source.author.len() > 16 * 1024
+        || !(64 * 1024 * 1024..=4 * 1024 * 1024 * 1024).contains(&source.cache_limit_bytes)
+    {
+        return Err("invalid Moke source metadata".into());
+    }
+
+    match source.kind.as_str() {
+        "local" => {
+            let source_path = source
+                .file_path
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "local Moke source requires filePath".to_string())?;
+            if command_file_path != Some(source_path) {
+                return Err("local Moke source filePath mismatch".into());
+            }
+        }
+        "remote" => {
+            if command_file_path.is_some() || !matches!(source.format.as_str(), "epub" | "pdf") {
+                return Err("remote Moke source must be EPUB or PDF".into());
+            }
+            let server = Url::parse(
+                source
+                    .server_url
+                    .as_deref()
+                    .ok_or_else(|| "remote Moke source requires serverUrl".to_string())?,
+            )
+            .map_err(|_| "invalid Moke serverUrl".to_string())?;
+            let remote = Url::parse(
+                source
+                    .url
+                    .as_deref()
+                    .ok_or_else(|| "remote Moke source requires url".to_string())?,
+            )
+            .map_err(|_| "invalid Moke source url".to_string())?;
+            if !matches!(server.scheme(), "http" | "https")
+                || !server.username().is_empty()
+                || server.password().is_some()
+                || server.query().is_some()
+                || server.fragment().is_some()
+                || !remote.username().is_empty()
+                || remote.password().is_some()
+                || remote.fragment().is_some()
+                || remote.origin() != server.origin()
+            {
+                return Err("remote Moke source is outside the configured server".into());
+            }
+            let expected_path = format!(
+                "{}/api/book/{}.{}",
+                server.path().trim_end_matches('/'),
+                source.book_id,
+                source.format
+            );
+            if remote.path() != expected_path || remote.query() != Some("mode=read") {
+                return Err("remote Moke source is outside the reading endpoint".into());
+            }
+        }
+        _ => return Err("unsupported Moke source kind".into()),
+    }
+    Ok(())
+}
+
+#[cfg(all(test, desktop))]
+mod moke_reader_source_validation_tests {
+    use super::validate_moke_reader_source;
+    use serde_json::json;
+
+    fn remote_source() -> serde_json::Value {
+        json!({
+            "kind": "remote",
+            "identity": "moke0123456789abcdef",
+            "cacheScope": "0123456789abcdef",
+            "cacheLimitBytes": 384 * 1024 * 1024,
+            "bookId": "42",
+            "format": "epub",
+            "title": "Sample",
+            "author": "Author",
+            "serverUrl": "https://books.test/library",
+            "url": "https://books.test/library/api/book/42.epub?mode=read"
+        })
+    }
+
+    #[test]
+    fn remote_source_is_limited_to_the_configured_read_endpoint() {
+        let source = remote_source();
+        assert!(validate_moke_reader_source(&source, None).is_ok());
+
+        let mut wrong_origin = source.clone();
+        wrong_origin["url"] = json!("https://other.test/library/api/book/42.epub?mode=read");
+        assert!(validate_moke_reader_source(&wrong_origin, None).is_err());
+
+        let mut wrong_query = source.clone();
+        wrong_query["url"] = json!("https://books.test/library/api/book/42.epub?mode=download");
+        assert!(validate_moke_reader_source(&wrong_query, None).is_err());
+
+        let mut traversal_scope = source;
+        traversal_scope["cacheScope"] = json!("../outside");
+        assert!(validate_moke_reader_source(&traversal_scope, None).is_err());
+    }
+
+    #[test]
+    fn local_source_must_match_the_separately_authorized_file_path() {
+        let source = json!({
+            "kind": "local",
+            "identity": "moke0123456789abcdef",
+            "cacheScope": "0123456789abcdef",
+            "cacheLimitBytes": 384 * 1024 * 1024,
+            "bookId": "42",
+            "format": "txt",
+            "title": "Sample",
+            "author": "Author",
+            "filePath": "C:\\Books\\sample.txt"
+        });
+        assert!(validate_moke_reader_source(&source, Some("C:\\Books\\sample.txt")).is_ok());
+        assert!(validate_moke_reader_source(&source, Some("C:\\Books\\other.txt")).is_err());
+    }
 }
 
 /// Frontend entry command for the embedded host (Moke). Mirrors the host's
@@ -568,21 +729,27 @@ fn open_reader_window_with_debug(
 #[tauri::command]
 async fn open_reader(
     app: AppHandle,
-    file_path: String,
+    file_path: Option<String>,
     eink: bool,
     debug_panel: Option<bool>,
     moke_book_id: Option<String>,
     restore_progress: Option<serde_json::Value>,
-    moke_source_server_url: Option<String>,
+    moke_source: Option<serde_json::Value>,
 ) -> Result<(), String> {
+    if file_path.is_none() && moke_source.is_none() {
+        return Err("open_reader requires filePath or mokeSource".into());
+    }
+    if let Some(source) = moke_source.as_ref() {
+        validate_moke_reader_source(source, file_path.as_deref())?;
+    }
     open_reader_window_with_debug(
         &app,
-        Some(PathBuf::from(file_path)),
+        file_path.map(PathBuf::from),
         eink,
         debug_panel.unwrap_or(false),
         moke_book_id,
         restore_progress,
-        moke_source_server_url,
+        moke_source,
     )
 }
 

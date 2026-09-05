@@ -16,23 +16,11 @@ Moke bundles `out/readest` and opens `/readest/reader`.
 | `moke=1` / `window.__MOKE_EMBEDDED` | Enables host integration. |
 | `mokeBookId` | Talebook book ID used by the progress API. |
 | `mokeServerUrl` | Absolute HTTP(S) Talebook base URL. Omitted on desktop while Moke's main window owns progress saving. |
-| `mokeSourceServerUrl` | Current Moke server origin. Present only for online books and used to bind the remote source to that origin. |
 | `mokeRestoreProgress` | URL-encoded JSON using `moke.readest.progress.v1`. |
 | `mokeReturnTo=/library` | The only allowed host return path. |
 | `mokeEink`, `mokeDebug` | `0`/`1` host presentation flags. |
 
 Moke accepts server URLs only through its server configuration flow. Reader does not evaluate arbitrary return URLs and never accepts credentials in query parameters.
-
-## Online source adapter
-
-An online EPUB is opened transiently from the Talebook bootstrap resource URL; it is never imported into Reader or Moke's offline library. Reader accepts this source only when all of the following hold:
-
-- `mokeSourceServerUrl` is the exact current HTTP(S) server origin;
-- the source is same-origin `/read/resource/{mokeBookId}.epub` with one safe `revision` value;
-- HEAD returns `application/epub+zip`, a positive length, `Accept-Ranges: bytes` and an ETag;
-- each body request is an exact 206 response for the requested range with the same ETag, MIME and total size.
-
-The transport uses the shared Tauri HTTP cookie jar, sets `maxRedirections: 0`, and never serializes cookies or tokens into the launch URL. A server that redirects, ignores Range, changes revision/ETag, or returns an unexpected MIME is rejected instead of being silently downloaded in full. Closing the transient file aborts active requests. Publication documents remain in Foliate sandbox frames and cannot invoke the top-level adapter.
 
 ## Native API
 

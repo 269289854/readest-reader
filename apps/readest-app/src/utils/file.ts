@@ -1,5 +1,44 @@
 import { FileHandle, open, BaseDirectory, SeekMode } from '@tauri-apps/plugin-fs';
 import { getOSPlatform } from './misc';
+import type { MokeRemoteBookSource } from '@/types/book';
+import {
+  mokeRemoteVersionKey,
+  readMokeRemoteChunk,
+  writeMokeRemoteChunk,
+} from '@/services/mokeRemoteCache';
+
+interface MokeRemoteMemoryCache {
+  cacheScope: string;
+  clearMemoryCache(): void;
+}
+
+const mokeRemoteFiles = new Set<MokeRemoteMemoryCache>();
+let cacheClearListenerStarted = false;
+
+function registerMokeRemoteFile(file: MokeRemoteMemoryCache): void {
+  mokeRemoteFiles.add(file);
+  if (cacheClearListenerStarted) return;
+  cacheClearListenerStarted = true;
+  void import('@tauri-apps/api/event')
+    .then(({ listen }) =>
+      listen<string | null>('moke-reader-cache-cleared', ({ payload }) => {
+        for (const remote of mokeRemoteFiles) {
+          if (!payload || remote.cacheScope === payload) remote.clearMemoryCache();
+        }
+      }),
+    )
+    .catch(() => {
+      cacheClearListenerStarted = false;
+    });
+}
+
+function isMokeAuthenticationResponse(response: Response): boolean {
+  return (
+    response.status === 401 ||
+    response.status === 403 ||
+    /text\/html/i.test(response.headers.get('content-type') || '')
+  );
+}
 
 class DeferredBlob extends Blob {
   #dataPromise: Promise<ArrayBuffer>;
@@ -54,17 +93,6 @@ export interface ClosableFile extends File {
   open(): Promise<this>;
   close(): Promise<void>;
 }
-
-export interface RemoteFileTransport {
-  fetch(url: string, init?: RequestInit): Promise<Response>;
-  close?(): void;
-  /** Optional source-specific cache window; online books keep this small. */
-  maxCacheChunkSize?: number;
-}
-
-const defaultRemoteFileTransport: RemoteFileTransport = {
-  fetch: (url, init) => fetch(url, init),
-};
 
 export class NativeFile extends File implements ClosableFile {
   #handle: FileHandle | null = null;
@@ -304,8 +332,10 @@ export class RemoteFile extends File implements ClosableFile {
   // When true, byte ranges are carried in the URL query (?start=&end=) instead
   // of a `Range` header — see fromNativePath().
   #queryRange = false;
-  #transport: RemoteFileTransport;
-  #maxCacheChunkSize: number;
+  #mokeSource?: MokeRemoteBookSource;
+  #versionKey = '';
+  #etag = '';
+  #lastModifiedHeader = '';
 
   static MAX_CACHE_CHUNK_SIZE = 1024 * 128;
   static MAX_CACHE_ITEMS_SIZE: number = 128;
@@ -317,7 +347,7 @@ export class RemoteFile extends File implements ClosableFile {
     name?: string,
     type = '',
     lastModified = Date.now(),
-    transport: RemoteFileTransport = defaultRemoteFileTransport,
+    options?: { mokeSource?: MokeRemoteBookSource },
   ) {
     const basename = url.split('/').pop() || 'remote-file';
     super([], name || basename, { type, lastModified });
@@ -325,8 +355,8 @@ export class RemoteFile extends File implements ClosableFile {
     this.#name = name || basename;
     this.#type = type;
     this.#lastModified = lastModified;
-    this.#transport = transport;
-    this.#maxCacheChunkSize = transport.maxCacheChunkSize ?? RemoteFile.MAX_CACHE_CHUNK_SIZE;
+    this.#mokeSource = options?.mokeSource;
+    if (this.#mokeSource) registerMokeRemoteFile(this);
   }
 
   /**
@@ -366,7 +396,7 @@ export class RemoteFile extends File implements ClosableFile {
   }
 
   async _open_with_head() {
-    const response = await this.#transport.fetch(this.url, { method: 'HEAD' });
+    const response = await fetch(this.url, { method: 'HEAD' });
     if (!response.ok) {
       throw new Error(`Failed to fetch file size: ${response.status}`);
     }
@@ -375,10 +405,149 @@ export class RemoteFile extends File implements ClosableFile {
     return this;
   }
 
-  async _open_with_range() {
-    const response = await this.#transport.fetch(this.url, {
-      headers: { Range: `bytes=${0}-${1023}` },
+  async #authenticatedFetch(url: string, init: RequestInit): Promise<Response> {
+    const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
+    const controller = new AbortController();
+    const parentSignal = init.signal;
+    const abortFromParent = () => controller.abort(parentSignal?.reason);
+    if (parentSignal?.aborted) {
+      abortFromParent();
+    } else {
+      parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+    }
+    const timeout = setTimeout(
+      () => controller.abort('moke.remote.timeout'),
+      RemoteFile.RANGE_FETCH_TIMEOUT_MS,
+    );
+    try {
+      return await tauriFetch(url, {
+        ...init,
+        signal: controller.signal,
+        credentials: 'include',
+        maxRedirections: 10,
+        danger: {
+          acceptInvalidCerts: true,
+          acceptInvalidHostnames: true,
+        },
+      } as Parameters<typeof tauriFetch>[1]);
+    } catch (error) {
+      if (controller.signal.aborted && !parentSignal?.aborted) {
+        throw new Error('moke.remote.timeout', { cause: error });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener('abort', abortFromParent);
+    }
+  }
+
+  async #cancelResponseBody(response: Response): Promise<void> {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // The body may already be closed or locked. Either state is safe here.
+    }
+  }
+
+  async #readResponseBuffer(response: Response): Promise<ArrayBuffer> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        response.arrayBuffer(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            void this.#cancelResponseBody(response);
+            reject(new Error('moke.remote.timeout'));
+          }, RemoteFile.RANGE_FETCH_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  async #openMokeRemote() {
+    const parseTotalSize = (contentRange: string): number => {
+      const match = contentRange.match(/^bytes\s+(?:\d+-\d+|\*)\/(\d+)$/i);
+      return match ? Number(match[1]) : Number.NaN;
+    };
+
+    const head = await this.#authenticatedFetch(this.url, { method: 'HEAD' });
+    const headContentRange = head.headers.get('content-range') || '';
+    const headContentLength = Number(head.headers.get('content-length'));
+    const headTotalSize = parseTotalSize(headContentRange);
+    const headSupportsRanges = /\bbytes\b/i.test(head.headers.get('accept-ranges') || '');
+    const headMetadata = {
+      contentType: head.headers.get('content-type') || '',
+      etag: head.headers.get('etag') || '',
+      lastModified: head.headers.get('last-modified') || '',
+    };
+    const headAuthenticationRequired = isMokeAuthenticationResponse(head);
+    await this.#cancelResponseBody(head);
+    if (headAuthenticationRequired) throw new Error('moke.remote.authentication_required');
+
+    let size = Number.NaN;
+    let metadata = headMetadata;
+    if (
+      head.status === 200 &&
+      !headContentRange &&
+      headSupportsRanges &&
+      Number.isSafeInteger(headContentLength) &&
+      headContentLength > 0
+    ) {
+      size = headContentLength;
+    } else if (
+      head.status === 206 &&
+      Number.isSafeInteger(headTotalSize) &&
+      headTotalSize > 0
+    ) {
+      // A retained Range header can turn HEAD into 206. Content-Length is only
+      // the partial length in that case; Content-Range carries the real size.
+      size = headTotalSize;
+    }
+
+    if (!Number.isSafeInteger(size) || size <= 0) {
+      const probe = await this.#authenticatedFetch(this.url, {
+        headers: { Range: 'bytes=0-0', 'Accept-Encoding': 'identity' },
+      });
+      if (isMokeAuthenticationResponse(probe)) {
+        await this.#cancelResponseBody(probe);
+        throw new Error('moke.remote.authentication_required');
+      }
+      if (probe.status !== 206) {
+        await this.#cancelResponseBody(probe);
+        throw new Error('moke.remote.range_unsupported');
+      }
+      const contentRange = probe.headers.get('content-range') || '';
+      const match = contentRange.match(/^bytes 0-0\/(\d+)$/i);
+      const body = await this.#readResponseBuffer(probe);
+      if (!match || body.byteLength !== 1) throw new Error('moke.remote.range_invalid');
+      size = Number(match[1]);
+      metadata = {
+        contentType: probe.headers.get('content-type') || headMetadata.contentType,
+        etag: probe.headers.get('etag') || headMetadata.etag,
+        lastModified: probe.headers.get('last-modified') || headMetadata.lastModified,
+      };
+    }
+
+    if (!Number.isSafeInteger(size) || size <= 0) throw new Error('moke.remote.size_invalid');
+
+    this.#size = size;
+    this.#type = metadata.contentType;
+    this.#etag = metadata.etag;
+    this.#lastModifiedHeader = metadata.lastModified;
+    const parsedModified = Date.parse(this.#lastModifiedHeader);
+    if (Number.isFinite(parsedModified)) this.#lastModified = parsedModified;
+    this.#versionKey = mokeRemoteVersionKey({
+      etag: this.#etag,
+      lastModified: this.#lastModifiedHeader,
+      size,
     });
+    return this;
+  }
+
+  async _open_with_range() {
+    const response = await fetch(this.url, { headers: { Range: `bytes=${0}-${1023}` } });
     if (!response.ok) {
       throw new Error(`Failed to fetch file size: ${response.status}`);
     }
@@ -413,7 +582,7 @@ export class RemoteFile extends File implements ClosableFile {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), RemoteFile.RANGE_FETCH_TIMEOUT_MS);
     try {
-      return await this.#transport.fetch(url, { signal: controller.signal });
+      return await fetch(url, { signal: controller.signal });
     } catch (error) {
       if (controller.signal.aborted) {
         throw new Error('Timed out waiting for rangefile protocol response', { cause: error });
@@ -425,6 +594,7 @@ export class RemoteFile extends File implements ClosableFile {
   }
 
   async open() {
+    if (this.#mokeSource) return this.#openMokeRemote();
     if (this.#queryRange) {
       return this._open_with_query();
     }
@@ -437,9 +607,17 @@ export class RemoteFile extends File implements ClosableFile {
   }
 
   async close(): Promise<void> {
-    this.#transport.close?.();
+    this.clearMemoryCache();
+    mokeRemoteFiles.delete(this);
+  }
+
+  clearMemoryCache(): void {
     this.#cache.clear();
     this.#order = [];
+  }
+
+  get cacheScope(): string {
+    return this.#mokeSource?.cacheScope || '';
   }
 
   async fetchRangePart(start: number, end: number) {
@@ -448,17 +626,57 @@ export class RemoteFile extends File implements ClosableFile {
     // console.log(`Fetching range: ${start}-${end}, size: ${end - start + 1}`);
     const response = this.#queryRange
       ? await this.#fetchQueryRange(`${this.url}&start=${start}&end=${end}`)
-      : await this.#transport.fetch(this.url, {
-          headers: { Range: `bytes=${start}-${end}` },
-        });
+      : this.#mokeSource
+        ? await this.#authenticatedFetch(this.url, {
+            headers: { Range: `bytes=${start}-${end}`, 'Accept-Encoding': 'identity' },
+          })
+        : await fetch(this.url, { headers: { Range: `bytes=${start}-${end}` } });
+    if (this.#mokeSource && isMokeAuthenticationResponse(response)) {
+      await this.#cancelResponseBody(response);
+      throw new Error('moke.remote.authentication_required');
+    }
+    if (this.#mokeSource && response.status !== 206) {
+      await this.#cancelResponseBody(response);
+      throw new Error('moke.remote.range_unsupported');
+    }
     if (!response.ok) {
+      await this.#cancelResponseBody(response);
       throw new Error(`Failed to fetch range: ${response.status}`);
     }
-    return response.arrayBuffer();
+    const buffer = this.#mokeSource
+      ? await this.#readResponseBuffer(response)
+      : await response.arrayBuffer();
+    if (this.#mokeSource) {
+      const contentRange = response.headers.get('content-range') || '';
+      const match = contentRange.match(/^bytes (\d+)-(\d+)\/(\d+)$/i);
+      const expected = end - start + 1;
+      if (
+        !match ||
+        Number(match[1]) !== start ||
+        Number(match[2]) !== end ||
+        Number(match[3]) !== this.size ||
+        buffer.byteLength !== expected
+      ) {
+        throw new Error('moke.remote.range_invalid');
+      }
+      const responseEtag = response.headers.get('etag') || '';
+      if (responseEtag && this.#etag && responseEtag !== this.#etag) {
+        this.#etag = responseEtag;
+        this.#versionKey = mokeRemoteVersionKey({
+          etag: responseEtag,
+          lastModified: response.headers.get('last-modified') || this.#lastModifiedHeader,
+          size: this.size,
+        });
+        this.clearMemoryCache();
+      }
+    }
+    return buffer;
   }
 
   // inclusive reading of the end: [start, end]
   async fetchRange(start: number, end: number): Promise<ArrayBuffer> {
+    if (this.#mokeSource) return this.#fetchMokeRange(start, end);
+
     const rangeSize = end - start + 1;
     const MAX_RANGE_LEN = 1024 * 1000;
 
@@ -476,7 +694,7 @@ export class RemoteFile extends File implements ClosableFile {
         offset += buffer.byteLength;
       }
       return combinedBuffer.buffer;
-    } else if (rangeSize > this.#maxCacheChunkSize) {
+    } else if (rangeSize > RemoteFile.MAX_CACHE_CHUNK_SIZE) {
       return this.fetchRangePart(start, end);
     } else {
       const cachedChunkStart = Array.from(this.#cache.keys()).find((chunkStart) => {
@@ -508,13 +726,72 @@ export class RemoteFile extends File implements ClosableFile {
     }
   }
 
+  async #fetchMokeRange(start: number, end: number): Promise<ArrayBuffer> {
+    start = Math.max(0, start);
+    end = Math.min(this.size - 1, end);
+    if (end < start) return new ArrayBuffer(0);
+
+    const output = new Uint8Array(end - start + 1);
+    const chunkSize = RemoteFile.MAX_CACHE_CHUNK_SIZE;
+    const firstChunk = Math.floor(start / chunkSize) * chunkSize;
+    let outputOffset = 0;
+    for (let chunkStart = firstChunk; chunkStart <= end; chunkStart += chunkSize) {
+      const chunkEnd = Math.min(this.size - 1, chunkStart + chunkSize - 1);
+      const chunk = await this.#loadMokeChunk(chunkStart, chunkEnd);
+      const copyStart = Math.max(start, chunkStart);
+      const copyEnd = Math.min(end, chunkEnd);
+      const sourceOffset = copyStart - chunkStart;
+      const copyLength = copyEnd - copyStart + 1;
+      output.set(new Uint8Array(chunk, sourceOffset, copyLength), outputOffset);
+      outputOffset += copyLength;
+    }
+    return output.buffer;
+  }
+
+  async #loadMokeChunk(chunkStart: number, chunkEnd: number): Promise<ArrayBuffer> {
+    const cached = this.#cache.get(chunkStart);
+    if (cached) {
+      this.#updateAccessOrder(chunkStart);
+      return cached;
+    }
+
+    const source = this.#mokeSource!;
+    const expectedBytes = chunkEnd - chunkStart + 1;
+    const disk = await readMokeRemoteChunk(source, this.#versionKey, chunkStart, expectedBytes);
+    if (disk) {
+      this.#cache.set(chunkStart, disk);
+      this.#updateAccessOrder(chunkStart);
+      this.#ensureCacheSize();
+      return disk;
+    }
+
+    const fetchKey = `moke:${this.#versionKey}:${chunkStart}`;
+    const pending = this.#pendingFetches.get(fetchKey);
+    if (pending) return pending;
+
+    const fetchPromise = (async () => {
+      const buffer = await this.fetchRangePart(chunkStart, chunkEnd);
+      this.#cache.set(chunkStart, buffer);
+      this.#updateAccessOrder(chunkStart);
+      this.#ensureCacheSize();
+      void writeMokeRemoteChunk(source, this.#versionKey, chunkStart, buffer);
+      return buffer;
+    })();
+    this.#pendingFetches.set(fetchKey, fetchPromise);
+    try {
+      return await fetchPromise;
+    } finally {
+      this.#pendingFetches.delete(fetchKey);
+    }
+  }
+
   async #fetchAndCacheChunkSafe(
     start: number,
     end: number,
     rangeSize: number,
   ): Promise<ArrayBuffer> {
     const chunkStart = Math.max(0, start - 1024);
-    const chunkEnd = Math.max(end, start + this.#maxCacheChunkSize - 1024 - 1);
+    const chunkEnd = Math.max(end, start + RemoteFile.MAX_CACHE_CHUNK_SIZE - 1024 - 1);
     const buffer = await this.fetchRangePart(chunkStart, chunkEnd);
 
     // Only one thread reaches here per unique range
