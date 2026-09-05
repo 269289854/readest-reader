@@ -5,7 +5,8 @@
   "readerRoute": "/readest/reader",
   "progressSchema": "moke.readest.progress.v1",
   "launchParameters": {
-    "file": { "required": true, "repeatable": true, "description": "Host-authorized local book path" },
+    "file": { "required": false, "repeatable": true, "description": "Legacy host-authorized local book path" },
+    "mokeSource": { "required": false, "encoding": "JSON", "description": "Moke local or authenticated remote source; remote URLs must match serverUrl /api/book/{id}.{epub|pdf}?mode=read" },
     "moke": { "required": true, "constant": "1" },
     "mokeBookId": { "required": false },
     "mokeServerUrl": { "required": false, "protocols": ["http", "https"] },
@@ -18,6 +19,9 @@
     "ext_reader_event",
     "moke_navigate",
     "moke_runtime_platform"
+    ,"moke_get_reader_cache_stats"
+    ,"moke_trim_reader_cache"
+    ,"moke_clear_reader_cache"
   ],
   "readerEvents": [
     "book:opened",

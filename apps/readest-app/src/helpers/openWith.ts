@@ -1,5 +1,6 @@
 import { isWebAppPlatform, hasCli } from '@/services/environment';
 import { AppService } from '@/types/system';
+import type { MokeBookSource } from '@/types/book';
 import { getCurrent } from '@tauri-apps/plugin-deep-link';
 
 declare global {
@@ -11,6 +12,7 @@ declare global {
     __MOKE_BOOK_ID?: string | null;
     __MOKE_SERVER_URL?: string | null;
     __MOKE_RESTORE_PROGRESS?: unknown;
+    __MOKE_BOOK_SOURCE?: MokeBookSource | null;
   }
 }
 

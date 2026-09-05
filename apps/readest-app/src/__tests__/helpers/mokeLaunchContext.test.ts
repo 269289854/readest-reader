@@ -52,6 +52,42 @@ describe('bootstrapMokeLaunchContext', () => {
     expect(window.__MOKE_DEBUG_PANEL).toBe(true);
   });
 
+  it('parses a direct Moke source without exposing it outside the bootstrap global', () => {
+    const source = {
+      kind: 'remote',
+      identity: 'mokedeadbeefdeadbeef',
+      cacheScope: '0123456789abcdef',
+      cacheLimitBytes: 384 * 1024 * 1024,
+      bookId: '42',
+      format: 'epub',
+      title: 'Sample',
+      author: 'Author',
+      serverUrl: 'https://books.test',
+      url: 'https://books.test/api/book/42.epub?mode=read',
+    };
+    window.history.replaceState(
+      {},
+      '',
+      `/reader?moke=1&mokeSource=${encodeURIComponent(JSON.stringify(source))}`,
+    );
+
+    bootstrapMokeLaunchContext();
+
+    expect(window.__MOKE_BOOK_SOURCE).toEqual(source);
+  });
+
+  it('rejects malformed direct source payloads', () => {
+    window.history.replaceState(
+      {},
+      '',
+      `/reader?moke=1&mokeSource=${encodeURIComponent(JSON.stringify({ kind: 'remote' }))}`,
+    );
+
+    bootstrapMokeLaunchContext();
+
+    expect(window.__MOKE_BOOK_SOURCE).toBeNull();
+  });
+
   it('keeps the debug panel enabled when native navigation carries a stale zero flag', () => {
     localStorage.setItem(
       'moke-developer-storage',

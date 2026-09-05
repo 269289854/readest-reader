@@ -36,7 +36,7 @@ import { isPseStreamFileName, openPseStreamBook, parsePseStreamFileName } from '
 import { DEFAULT_BOOK_SEARCH_CONFIG, DEFAULT_FIXED_LAYOUT_VIEW_SETTINGS } from './constants';
 import { isContentURI, isValidURL, makeSafeFilename } from '@/utils/misc';
 import { deserializeConfig, serializeConfig, serializeRawConfig } from '@/utils/serializer';
-import { ClosableFile } from '@/utils/file';
+import { ClosableFile, RemoteFile } from '@/utils/file';
 import { TxtToEpubConverter } from '@/utils/txt';
 import { svg2png } from '@/utils/svg';
 import { normalizeMetadataIsbn } from '@/utils/isbn';
@@ -966,8 +966,18 @@ export async function loadBookContent(
   // Both operations use the same authorization-checked source. Resolving them
   // together avoids a second resolveBookContentSource/exists chain while the
   // file open and native-path lookup can still overlap.
+  const openSource =
+    source.kind === 'url' && book.mokeSource?.kind === 'remote'
+      ? new RemoteFile(
+          source.path,
+          `${book.title}.${book.mokeSource.format}`,
+          book.mokeSource.format === 'pdf' ? 'application/pdf' : 'application/epub+zip',
+          Date.now(),
+          { mokeSource: book.mokeSource },
+        ).open()
+      : fs.openFile(source.path, source.base);
   const [file, nativeFilePath] = await Promise.all([
-    fs.openFile(source.path, source.base),
+    openSource,
     resolveNativeSourceFilePath(source, resolveFilePath),
   ]);
   return { book, file, nativeFilePath };

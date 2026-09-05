@@ -85,11 +85,39 @@ export interface ImportBookOptions {
   lookupIndex?: BookLookupIndex;
 }
 
+export interface MokeBookSourceBase {
+  bookId: string;
+  format: string;
+  title: string;
+  author: string;
+  identity: string;
+  cacheScope: string;
+  cacheLimitBytes: number;
+}
+
+export interface MokeLocalBookSource extends MokeBookSourceBase {
+  kind: 'local';
+  filePath: string;
+  fileVersion?: string;
+}
+
+export interface MokeRemoteBookSource extends MokeBookSourceBase {
+  kind: 'remote';
+  format: 'epub' | 'pdf';
+  serverUrl: string;
+  url: string;
+}
+
+export type MokeBookSource = MokeLocalBookSource | MokeRemoteBookSource;
+
 export interface Book {
   // if Book is a remote book we just lazy load the book content via url
   url?: string;
   // if Book is a transient local book we can load the book content via filePath
   filePath?: string;
+  // Direct source supplied by the Moke host. This bypasses transient import
+  // and file hashing while preserving a stable identity across local/remote.
+  mokeSource?: MokeBookSource;
   // Other on-disk paths that resolved to this same book — a watched folder
   // holding the same file twice under different names, or a copy left behind
   // after a rename. Only `filePath` is ever read from; these are remembered so

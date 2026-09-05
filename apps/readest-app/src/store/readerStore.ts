@@ -35,6 +35,7 @@ import {
   emitReaderEvent,
   bookEventData,
   withMokeAnnotationNavigation,
+  markMokeOnlineRead,
   type MokeAnnotationNavigationContext,
 } from '@/services/mokeBridge';
 
@@ -383,6 +384,7 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
           ...bookEventData(book),
           view_key: key,
         });
+        if (book.mokeSource?.kind === 'remote') void markMokeOnlineRead();
       }
     } catch (error) {
       pendingNavCacheWrites.delete(id);
