@@ -1,6 +1,6 @@
 # Readest Reader
 
-`readest-reader` is the Reader-only, embeddable boundary extracted from [Readest](https://github.com/hehetoshang/readest). It contains the React/Next.js reading surface, the `foliate-js` engine and the `readestlib` Tauri backend used by [Moke](https://github.com/talebook/moke).
+`readest-reader` is the Reader-only, embeddable boundary extracted from [Readest](https://github.com/hehetoshang/readest). It contains the React/Next.js reading surface, the `foliate-js` engine and the `readestlib` Tauri backend used by [Moke](https://github.com/269289854/moke-miku).
 
 The migration baseline is Readest commit `b2b5d2f16ae5c76f8b71fec55ba1eef9713cf195`. The Reader-relevant follow-up from merged [Readest PR #33](https://github.com/hehetoshang/readest/pull/33), commit `cf41c5ae5682ac6a85dcd3fb77eb7911ce8ab300`, is synchronized on top. The original Readest repository and its history are not modified. The retained history in this repository covers the Moke/Reader first-parent changes; import commits record the path-filtered snapshots.
 
@@ -34,7 +34,7 @@ This is an embedded component, not a second ebook server. `mokeServerUrl` is the
 ## Fresh clone
 
 ```bash
-git clone --recursive https://github.com/hehetoshang/readest-reader.git
+git clone --recursive https://github.com/269289854/readest-reader.git
 cd readest-reader
 corepack enable
 pnpm install --frozen-lockfile
