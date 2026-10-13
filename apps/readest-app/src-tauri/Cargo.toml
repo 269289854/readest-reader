@@ -4,7 +4,7 @@ version = "0.2.2"
 description = "Your online library"
 authors = ["Bilingify LLC"]
 license = "AGPL-3.0-only"
-repository = "https://github.com/hehetoshang/readest-reader"
+repository = "https://github.com/269289854/readest-reader"
 edition = "2021"
 rust-version = "1.88"
 

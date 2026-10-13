@@ -11,7 +11,7 @@ This lane uses the real Moke Tauri host, the real `readestlib` backend, a real E
 
 ## Procedure
 
-1. Clone Moke recursively and confirm its `readest` submodule URL is `https://github.com/hehetoshang/readest-reader.git`.
+1. Clone Moke recursively and confirm its `readest` submodule URL is `https://github.com/269289854/readest-reader.git`.
 2. Install both workspaces and run `pnpm build:reader` in Moke.
 3. Start Moke with its Tauri E2E/WebDriver feature under the desktop session.
 4. In Moke, configure the Talebook server, authenticate, open an EPUB from its detail/shelf flow, and wait for the dedicated Reader window.

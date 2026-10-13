@@ -1,6 +1,6 @@
 [submodule "vendor/foliate-js"]
 	path = vendor/foliate-js
-	url = https://github.com/hehetoshang/foliate-js.git
+	url = https://github.com/269289854/foliate-js.git
 [submodule "vendor/simplecc-wasm"]
 	path = vendor/simplecc-wasm
 	url = https://github.com/readest/simplecc-wasm.git

@@ -25,9 +25,9 @@ glib = "0.20.0"
 
 [workspace.package]
 authors = ["Bilingify LLC", "Readest contributors"]
-homepage = "https://github.com/hehetoshang/readest-reader"
+homepage = "https://github.com/269289854/readest-reader"
 license = "AGPL-3.0-only"
-repository = "https://github.com/hehetoshang/readest-reader"
+repository = "https://github.com/269289854/readest-reader"
 categories = []
 edition = "2021"
 rust-version = "1.88"
